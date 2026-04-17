@@ -1,29 +1,33 @@
-const planesList = document.getElementById("planes");
-const alertsList = document.getElementById("alerts");
+async function loadCollisions() {
+    try {
+        const res = await fetch("http://localhost:5000/collisions");
+        const data = await res.json();
 
-async function fetchData() {
-    // get planes
-    const planesRes = await fetch("http://127.0.0.1:5000/planes");
-    const planes = await planesRes.json();
+        const list = document.getElementById("collisionList");
+        list.innerHTML = "";
 
-    planesList.innerHTML = "";
-    planes.forEach(p => {
-        const li = document.createElement("li");
-        li.textContent = `Plane ${p.planeId} → (${p.lat}, ${p.lon})`;
-        planesList.appendChild(li);
-    });
+        data.forEach(c => {
+            const li = document.createElement("li");
 
-    // get alerts
-    const alertsRes = await fetch("http://127.0.0.1:5000/alerts");
-    const alerts = await alertsRes.json();
+            if (c.status === "NEW") {
+                li.textContent = `🚨 ${c.plane1} & ${c.plane2} STARTED (${c.time})`;
+                li.style.background = "#ff4d4d";
+            } 
+            else if (c.status === "ONGOING") {
+                li.textContent = `⚠️ ${c.plane1} & ${c.plane2} ONGOING (${c.time})`;
+                li.style.background = "#ffa500";
+            } 
+            else if (c.status === "ENDED") {
+                li.textContent = `✅ ${c.plane1} & ${c.plane2} ENDED (${c.time})`;
+                li.style.background = "#4CAF50";
+            }
 
-    alertsList.innerHTML = "";
-    alerts.forEach(a => {
-        const li = document.createElement("li");
-        li.textContent = a;
-        alertsList.appendChild(li);
-    });
+            list.appendChild(li);
+        });
+    } catch (err) {
+        console.error("Error fetching collisions:", err);
+    }
 }
 
 // refresh every 2 seconds
-setInterval(fetchData, 2000);
+setInterval(loadCollisions, 2000);

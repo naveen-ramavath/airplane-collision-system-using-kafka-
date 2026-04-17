@@ -2,18 +2,44 @@
 <html>
 <head>
     <title>Airplane Collision Dashboard</title>
+    <style>
+        body {
+            font-family: Arial;
+            background: #f4f4f4;
+            text-align: center;
+        }
+
+        h1 {
+            color: #333;
+        }
+
+        ul {
+            list-style: none;
+            padding: 0;
+        }
+
+        li {
+            background: #ff4d4d;
+            color: white;
+            margin: 10px auto;
+            padding: 10px;
+            width: 300px;
+            border-radius: 8px;
+            font-weight: bold;
+        }
+    </style>
 </head>
 <body>
 
     <h1>✈️ Plane Dashboard</h1>
 
-    <h2>Live Planes</h2>
-    <ul id="planes"></ul>
-
-    <h2>⚠️ Alerts</h2>
-    <ul id="alerts"></ul>
+    <h2>⚠️ Collision Alerts</h2>
+    <ul id="collisionList"></ul>
 
     <script src="script.js"></script>
+    <script>
+        loadCollisions();
+    </script>
 
 </body>
 </html>
