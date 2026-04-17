@@ -60,11 +60,18 @@ def detect_collision(batch_df, batch_id):
             p2 = planes[j]
 
             pair = tuple(sorted([p1.planeId, p2.planeId]))
+            # this is a very simplified collision logic for demo purposes
+
+            # is_collision = (
+            #     abs(p1.lat - p2.lat) < 0.9 and
+            #     abs(p1.lon - p2.lon) < 0.9 and
+            #     abs(p1.altitude - p2.altitude) < 2700
+            # )
 
             is_collision = (
-                abs(p1.lat - p2.lat) < 0.9 and
-                abs(p1.lon - p2.lon) < 0.9 and
-                abs(p1.altitude - p2.altitude) < 2700
+                abs(p1.lat - p2.lat) < 1.0 and
+                abs(p1.lon - p2.lon) < 1.0 and
+                abs(p1.altitude - p2.altitude) < 2800
             )
 
             current_pairs[pair] = is_collision
