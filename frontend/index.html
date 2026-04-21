@@ -1,45 +1,158 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
+
 <head>
-    <title>Airplane Collision Dashboard</title>
-    <style>
-        body {
-            font-family: Arial;
-            background: #f4f4f4;
-            text-align: center;
-        }
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AeroGuard — Real-Time Collision Detection</title>
+    <meta name="description" content="Real-time airplane collision detection system powered by Apache Kafka and PySpark Structured Streaming.">
 
-        h1 {
-            color: #333;
-        }
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 
-        ul {
-            list-style: none;
-            padding: 0;
-        }
-
-        li {
-            background: #ff4d4d;
-            color: white;
-            margin: 10px auto;
-            padding: 10px;
-            width: 300px;
-            border-radius: 8px;
-            font-weight: bold;
-        }
-    </style>
+    <link rel="stylesheet" href="style.css">
 </head>
+
 <body>
 
-    <h1>✈️ Plane Dashboard</h1>
+    <!-- AMBIENT BACKGROUND ORBS -->
+    <div class="bg-orb orb-1"></div>
+    <div class="bg-orb orb-2"></div>
+    <div class="bg-orb orb-3"></div>
 
-    <h2>⚠️ Collision Alerts</h2>
-    <ul id="collisionList"></ul>
+    <div class="app-container">
+
+        <!-- ===== HEADER ===== -->
+        <header class="app-header">
+            <div class="header-left">
+                <div class="logo-badge">
+                    <span class="logo-icon">✈</span>
+                </div>
+                <div>
+                    <h1 class="app-title">AeroGuard</h1>
+                    <p class="app-subtitle">Real-Time Collision Detection System</p>
+                </div>
+            </div>
+            <div class="header-right">
+                <div class="status-indicator" id="connectionStatus">
+                    <span class="status-dot" id="statusDot"></span>
+                    <span id="statusText">Connecting…</span>
+                </div>
+                <div class="live-badge">
+                    <span class="pulse-ring"></span>
+                    LIVE
+                </div>
+            </div>
+        </header>
+
+        <!-- ===== STATS ROW ===== -->
+        <div class="stats-row">
+            <div class="stat-card">
+                <div class="stat-icon">✈️</div>
+                <div class="stat-info">
+                    <div class="stat-value" id="statsFlights">0</div>
+                    <div class="stat-label">Active Flights</div>
+                </div>
+            </div>
+            <div class="stat-card danger">
+                <div class="stat-icon">🚨</div>
+                <div class="stat-info">
+                    <div class="stat-value" id="statsNew">0</div>
+                    <div class="stat-label">New Alerts</div>
+                </div>
+            </div>
+            <div class="stat-card warning">
+                <div class="stat-icon">⚠️</div>
+                <div class="stat-info">
+                    <div class="stat-value" id="statsOngoing">0</div>
+                    <div class="stat-label">Ongoing</div>
+                </div>
+            </div>
+            <div class="stat-card success">
+                <div class="stat-icon">✅</div>
+                <div class="stat-info">
+                    <div class="stat-value" id="statsEnded">0</div>
+                    <div class="stat-label">Resolved</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ===== MAIN GRID ===== -->
+        <div class="main-grid">
+
+            <!-- COLLISION ALERTS PANEL -->
+            <section class="panel" id="collisionsPanel">
+                <div class="panel-header">
+                    <div class="panel-title">
+                        <span class="panel-icon">🛡️</span>
+                        Collision Alerts
+                    </div>
+                    <span class="badge" id="collisionsCount">0</span>
+                </div>
+                <div class="panel-body">
+                    <div class="empty-state" id="emptyState">
+                        <div class="empty-icon">🛡️</div>
+                        <p class="empty-title">All Clear</p>
+                        <p class="empty-subtitle">No collision threats detected. Airspace is safe.</p>
+                    </div>
+                    <ul id="collisionList" class="collision-list"></ul>
+                </div>
+            </section>
+
+            <!-- LIVE FLIGHTS TABLE PANEL -->
+            <section class="panel" id="flightsPanel">
+                <div class="panel-header">
+                    <div class="panel-title">
+                        <span class="panel-icon">📡</span>
+                        Live Airspace
+                    </div>
+                    <span class="badge" id="flightsCount">0</span>
+                </div>
+                <div class="panel-body">
+                    <div class="table-wrapper">
+                        <table id="flightsTable">
+                            <thead>
+                                <tr>
+                                    <th>Flight ID</th>
+                                    <th>Latitude</th>
+                                    <th>Longitude</th>
+                                    <th>Altitude (ft)</th>
+                                    <th>Speed (kts)</th>
+                                    <th>Status</th>
+                                </tr>
+                            </thead>
+                            <tbody id="flightsList">
+                                <tr class="empty-row">
+                                    <td colspan="6">
+                                        <div class="table-empty">
+                                            <span>📡</span>
+                                            Waiting for flight telemetry…
+                                        </div>
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+
+        </div>
+
+        <!-- ===== FOOTER ===== -->
+        <footer class="app-footer">
+            <span>AeroGuard v1.0</span>
+            <span class="footer-sep">·</span>
+            <span>Kafka + PySpark + Flask</span>
+            <span class="footer-sep">·</span>
+            <span id="lastUpdated">Last updated: —</span>
+        </footer>
+
+    </div>
 
     <script src="script.js"></script>
-    <script>
-        loadCollisions();
-    </script>
 
 </body>
+
 </html>

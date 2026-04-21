@@ -1,138 +1,294 @@
+"""
+AeroGuard — Spark Structured Streaming Consumer
+================================================
+Reads plane telemetry from Kafka, detects collisions between
+every pair of planes, and POSTs state changes to Flask.
+
+Collision thresholds:
+  distance  < 0.1  degrees (≈ 11 km)
+  altitude  < 3500 feet difference
+
+State machine per pair:
+  (not colliding) ──NEW──► ACTIVE ──ONGOING──► ACTIVE ──ENDED──► (not colliding)
+
+ONGOING heartbeats are throttled: one POST per pair every 10 s.
+"""
+
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, from_json
-from pyspark.sql.types import *
+from pyspark.sql.types import (
+    StructType, StringType, DoubleType, IntegerType
+)
 import time
 import requests
+import subprocess
 
-# Create Spark session
+# ─────────────────────────────────────────────────────────────
+#  RESOLVE WINDOWS HOST IP FROM WSL
+# ─────────────────────────────────────────────────────────────
+
+def get_windows_host_ip() -> str:
+    """
+    Tries three strategies to find the IP of the Windows host
+    that WSL2 can reach, in order of reliability.
+    """
+    # 1. /etc/resolv.conf nameserver line
+    try:
+        with open("/etc/resolv.conf") as f:
+            for line in f:
+                if line.startswith("nameserver"):
+                    ip = line.strip().split()[1]
+                    print(f"[CONFIG] Host IP from resolv.conf: {ip}")
+                    return ip
+    except Exception as e:
+        print(f"[WARN]  resolv.conf failed: {e}")
+
+    # 2. ip route default gateway
+    try:
+        out = subprocess.check_output(["ip", "route", "show", "default"], text=True)
+        ip  = out.strip().split()[2]          # "default via <IP> dev eth0"
+        print(f"[CONFIG] Host IP from ip route: {ip}")
+        return ip
+    except Exception as e:
+        print(f"[WARN]  ip route failed: {e}")
+
+    # 3. Hard-coded fallback
+    ip = "172.17.48.1"
+    print(f"[CONFIG] Using fallback IP: {ip}")
+    return ip
+
+
+WINDOWS_HOST_IP = get_windows_host_ip()
+BACKEND_URL     = f"http://{WINDOWS_HOST_IP}:5000"
+print(f"[CONFIG] Flask backend → {BACKEND_URL}")
+
+
+# ─────────────────────────────────────────────────────────────
+#  STARTUP CONNECTIVITY CHECK
+# ─────────────────────────────────────────────────────────────
+
+def check_backend_reachable() -> bool:
+    try:
+        r = requests.get(f"{BACKEND_URL}/ping", timeout=3)
+        print(f"[CONFIG] ✅ Backend reachable — HTTP {r.status_code}")
+        return True
+    except requests.exceptions.ConnectionError:
+        print(f"[CONFIG] ❌ Cannot reach Flask at {BACKEND_URL}")
+        print( "[CONFIG]    → Start Flask: python app.py  (Windows, host='0.0.0.0')")
+        print( "[CONFIG]    → Allow port 5000 in Windows Firewall")
+        return False
+
+
+check_backend_reachable()
+
+
+# ─────────────────────────────────────────────────────────────
+#  SPARK SESSION
+# ─────────────────────────────────────────────────────────────
+
 spark = SparkSession.builder \
-    .appName("AirplaneCollision") \
+    .appName("AeroGuard-CollisionDetection") \
     .getOrCreate()
 
 spark.sparkContext.setLogLevel("ERROR")
 
-# Kafka stream
-df = spark.readStream \
+
+# ─────────────────────────────────────────────────────────────
+#  KAFKA STREAM
+# ─────────────────────────────────────────────────────────────
+
+raw_df = spark.readStream \
     .format("kafka") \
     .option("kafka.bootstrap.servers", "localhost:9092") \
-    .option("subscribe", "plane-data") \
-    .option("startingOffsets", "earliest") \
+    .option("subscribe",               "plane-data") \
+    .option("startingOffsets",         "latest") \
     .load()
 
-# Schema
-schema = StructType() \
-    .add("planeId", StringType()) \
-    .add("lat", DoubleType()) \
-    .add("lon", DoubleType()) \
-    .add("altitude", IntegerType()) \
-    .add("speed", IntegerType())
 
-# Convert JSON
-json_df = df.selectExpr("CAST(value AS STRING)") \
-    .select(from_json(col("value"), schema).alias("data")) \
-    .select("data.*")
+# ─────────────────────────────────────────────────────────────
+#  SCHEMA + PARSE
+# ─────────────────────────────────────────────────────────────
 
-# ✅ GLOBAL STATE (IMPORTANT)
-plane_state = {}
-collision_status = {}
-last_print_time = {}
+plane_schema = StructType() \
+    .add("planeId",   StringType()) \
+    .add("lat",       DoubleType()) \
+    .add("lon",       DoubleType()) \
+    .add("altitude",  IntegerType()) \
+    .add("speed",     IntegerType())
 
-# Collision logic
+planes_df = raw_df \
+    .selectExpr("CAST(value AS STRING) AS value") \
+    .select(from_json(col("value"), plane_schema).alias("d")) \
+    .select("d.*")
+
+
+# ─────────────────────────────────────────────────────────────
+#  COLLISION THRESHOLDS
+#
+#  DIST_THRESHOLD : horizontal distance in degrees
+#    0.1° ≈ 11 km  — use 0.5° for easier testing with spread data
+#
+#  ALT_THRESHOLD  : vertical separation in feet
+#    3500 ft is standard separation minimum
+# ─────────────────────────────────────────────────────────────
+
+DIST_THRESHOLD = 0.1    # degrees  — relaxed for testing (old producer data spreads planes)
+ALT_THRESHOLD  = 800   # feet     — relaxed so altitude spread doesn't block all detections
+
+
+# ─────────────────────────────────────────────────────────────
+#  GLOBAL STATE  (lives in the Spark driver process)
+# ─────────────────────────────────────────────────────────────
+
+plane_state      = {}   # planeId  → Row  (latest position)
+collision_status = {}   # pair     → bool (True = currently colliding)
+last_post_time   = {}   # pair     → float (epoch of last ONGOING POST)
+
+ONGOING_THROTTLE_SEC = 10   # minimum seconds between ONGOING heartbeats
+
+
+# ─────────────────────────────────────────────────────────────
+#  HTTP HELPER
+# ─────────────────────────────────────────────────────────────
+
+def safe_post(endpoint: str, payload, label: str = "") -> bool:
+    url = f"{BACKEND_URL}{endpoint}"
+    try:
+        res = requests.post(url, json=payload, timeout=5)
+        print(f"[POST ✅] {label:20s} → HTTP {res.status_code} | {res.text[:60]}")
+        return True
+    except requests.exceptions.ConnectionError as e:
+        print(f"[POST ❌] {label} → ConnectionError: {e}")
+        print(f"          Is Flask running at {BACKEND_URL}?")
+    except requests.exceptions.Timeout:
+        print(f"[POST ⏱] {label} → Timed out after 5 s")
+    except Exception as e:
+        print(f"[POST ❌] {label} → {type(e).__name__}: {e}")
+    return False
+
+
+# ─────────────────────────────────────────────────────────────
+#  BATCH PROCESSOR  (called by foreachBatch)
+# ─────────────────────────────────────────────────────────────
+
 def detect_collision(batch_df, batch_id):
-    global plane_state, collision_status, last_print_time
+    """
+    Called once per micro-batch.
 
-    new_data = batch_df.collect()
+    Steps:
+      1. Update plane_state with latest rows from this batch.
+      2. POST all current positions to /flights.
+      3. Compute distance + altitude diff for every pair.
+      4. Print diagnostic table so you can see why pairs collide or not.
+      5. Diff against collision_status → fire NEW / ONGOING / ENDED.
+      6. Update collision_status.
+    """
+    global plane_state, collision_status, last_post_time
 
-    # update latest positions
-    for p in new_data:
-        plane_state[p.planeId] = p
-
-    planes = list(plane_state.values())
-
-    if len(planes) < 2:
+    rows = batch_df.collect()
+    if not rows:
         return
 
-    current_pairs = {}
+    # ── 1. Update positions ─────────────────────────────────
+    for row in rows:
+        if row.planeId:
+            plane_state[row.planeId] = row
 
-    for i in range(len(planes)):
-        for j in range(i + 1, len(planes)):
-            p1 = planes[i]
-            p2 = planes[j]
+    planes = list(plane_state.values())
+    n      = len(planes)
 
+    # ── 2. Send all flights to Flask ────────────────────────
+    safe_post("/flights",
+              [p.asDict() for p in planes],
+              label="FLIGHTS")
+
+    if n < 2:
+        print(f"[Batch {batch_id}] Only {n} plane known — need ≥ 2 for collision check")
+        return
+
+    # ── 3. Compute all pair metrics ──────────────────────────
+    current_pairs = {}   # pair → bool
+    pair_metrics  = {}   # pair → (dist, alt_d)
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            p1   = planes[i]
+            p2   = planes[j]
             pair = tuple(sorted([p1.planeId, p2.planeId]))
-            # this is a very simplified collision logic for demo purposes
 
-            # is_collision = (
-            #     abs(p1.lat - p2.lat) < 0.9 and
-            #     abs(p1.lon - p2.lon) < 0.9 and
-            #     abs(p1.altitude - p2.altitude) < 2700
-            # )
+            dist  = ((p1.lat - p2.lat) ** 2 + (p1.lon - p2.lon) ** 2) ** 0.5
+            alt_d = abs(p1.altitude - p2.altitude)
 
-            is_collision = (
-                abs(p1.lat - p2.lat) < 1.0 and
-                abs(p1.lon - p2.lon) < 1.0 and
-                abs(p1.altitude - p2.altitude) < 2800
-            )
+            is_col = dist < DIST_THRESHOLD and alt_d < ALT_THRESHOLD
+            current_pairs[pair] = is_col
+            pair_metrics[pair]  = (dist, alt_d)
 
-            current_pairs[pair] = is_collision
+    # ── 4. Diagnostic table (every batch) ───────────────────
+    total_pairs     = len(current_pairs)
+    colliding_pairs = sum(1 for v in current_pairs.values() if v)
+    print(f"\n[Batch {batch_id}] Planes: {[p.planeId for p in planes]}")
+    print(f"  Thresholds → dist < {DIST_THRESHOLD:.1f}°  |  alt < {ALT_THRESHOLD:,} ft")
+    print(f"  {'PAIR':<12} {'DIST (°)':>10} {'ALT DIFF (ft)':>14} {'COLLIDING':>10}")
+    print(f"  {'─'*12} {'─'*10} {'─'*14} {'─'*10}")
+    for pair, (dist, alt_d) in sorted(pair_metrics.items()):
+        col_str = "💥 YES" if current_pairs[pair] else "no"
+        mark_d  = "✓" if dist  < DIST_THRESHOLD else f"✗>{DIST_THRESHOLD}"
+        mark_a  = "✓" if alt_d < ALT_THRESHOLD  else f"✗>{ALT_THRESHOLD}"
+        print(f"  {pair[0]+' & '+pair[1]:<12} {dist:>9.4f}{mark_d}  {alt_d:>7,} ft{mark_a}  {col_str:>10}")
+    print(f"  → {colliding_pairs}/{total_pairs} pairs colliding")
 
-    
-    # Compare with previous state
-   
+    # ── 5. Fire state-change events ─────────────────────────
+    now = time.time()
 
-    for pair, is_collision in current_pairs.items():
-        prev = collision_status.get(pair, False)
-        now = time.time()
+    for pair, is_col in current_pairs.items():
+        was_col = collision_status.get(pair, False)
 
-        # NEW collision
-        if is_collision and not prev:
-            print(f"\n🚨 NEW Collision: {pair[0]} & {pair[1]}")
-
-            # send to backend
-            requests.post("http://localhost:5000/collision", json={
+        # ── NEW ──────────────────────────────────────────────
+        if is_col and not was_col:
+            print(f"\n🚨 NEW Collision    : {pair[0]} & {pair[1]}")
+            safe_post("/collision", {
                 "plane1": pair[0],
                 "plane2": pair[1],
                 "status": "NEW",
-                "time": time.strftime("%H:%M:%S")
-            })
+                "time":   time.strftime("%H:%M:%S"),
+            }, label="NEW COLLISION")
+            last_post_time[pair] = now
 
-            last_print_time[pair] = now
-
-        # ONGOING (print every 5 sec only)
-        elif is_collision and prev:
-            last_time = last_print_time.get(pair, 0)
-
-            if now - last_time > 15:   # 🔥 control frequency
-                print(f"⚠️ Ongoing Collision: {pair[0]} & {pair[1]}")
-                last_print_time[pair] = now
-
-                requests.post("http://localhost:5000/collision", json={
+        # ── ONGOING (throttled to every 10 s) ─────────────────
+        elif is_col and was_col:
+            if now - last_post_time.get(pair, 0) > ONGOING_THROTTLE_SEC:
+                print(f"⚠️  Ongoing Collision: {pair[0]} & {pair[1]}")
+                safe_post("/collision", {
                     "plane1": pair[0],
                     "plane2": pair[1],
                     "status": "ONGOING",
-                    "time": time.strftime("%H:%M:%S")
-                })
+                    "time":   time.strftime("%H:%M:%S"),
+                }, label="ONGOING COLLISION")
+                last_post_time[pair] = now
 
-        # ENDED
-        elif not is_collision and prev:
-            print(f"✅ Collision Ended: {pair[0]} & {pair[1]}")
-            if pair in last_print_time:
-                del last_print_time[pair]
-            
-            requests.post("http://localhost:5000/collision", json={
+        # ── ENDED ─────────────────────────────────────────────
+        elif not is_col and was_col:
+            print(f"✅ Collision Ended  : {pair[0]} & {pair[1]}")
+            safe_post("/collision", {
                 "plane1": pair[0],
                 "plane2": pair[1],
                 "status": "ENDED",
-                "time": time.strftime("%H:%M:%S")
-            })
+                "time":   time.strftime("%H:%M:%S"),
+            }, label="ENDED COLLISION")
+            last_post_time.pop(pair, None)
 
-    # update state
-    collision_status = current_pairs
+    # ── 6. Persist only currently-active pairs ───────────────
+    collision_status = {p: True for p, v in current_pairs.items() if v}
 
 
-# Start streaming
-query = json_df.writeStream \
+# ─────────────────────────────────────────────────────────────
+#  START STREAMING QUERY
+# ─────────────────────────────────────────────────────────────
+
+query = planes_df.writeStream \
     .foreachBatch(detect_collision) \
+    .option("checkpointLocation", "/tmp/aeroguard_checkpoint") \
     .start()
 
+print("[Spark] ✅ Streaming started — waiting for plane data…")
 query.awaitTermination()
