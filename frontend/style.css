@@ -603,6 +603,32 @@ body {
     50%       { opacity: 0.5; }
 }
 
+.flight-status-badge.warning {
+    background: var(--warning-bg);
+    color: var(--warning);
+    border-color: rgba(255, 169, 64, 0.3);
+}
+
+.flight-status-badge.success {
+    /* Uses base styling by default */
+}
+
+.high-risk-row {
+    background-color: rgba(255, 77, 109, 0.08) !important;
+}
+
+#flightsTable tbody tr.high-risk-row:hover {
+    background-color: rgba(255, 77, 109, 0.15) !important;
+}
+
+.medium-risk-row {
+    background-color: rgba(255, 169, 64, 0.06) !important;
+}
+
+#flightsTable tbody tr.medium-risk-row:hover {
+    background-color: rgba(255, 169, 64, 0.12) !important;
+}
+
 .table-empty {
     display: flex;
     flex-direction: column;

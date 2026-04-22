@@ -197,18 +197,21 @@ def detect_collision(batch_df, batch_id):
     planes = list(plane_state.values())
     n      = len(planes)
 
-    # ── 2. Send all flights to Flask ────────────────────────
-    safe_post("/flights",
-              [p.asDict() for p in planes],
-              label="FLIGHTS")
-
     if n < 2:
         print(f"[Batch {batch_id}] Only {n} plane known — need ≥ 2 for collision check")
+        # Still post flights
+        payload = []
+        for p in planes:
+            pd = p.asDict()
+            pd["risk"] = "LOW"
+            payload.append(pd)
+        safe_post("/flights", payload, label="FLIGHTS")
         return
 
-    # ── 3. Compute all pair metrics ──────────────────────────
+    # ── 3. Compute all pair metrics & Graph Degree ───────────
     current_pairs = {}   # pair → bool
     pair_metrics  = {}   # pair → (dist, alt_d)
+    degrees       = {p.planeId: 0 for p in planes}
 
     for i in range(n):
         for j in range(i + 1, n):
@@ -222,6 +225,25 @@ def detect_collision(batch_df, batch_id):
             is_col = dist < DIST_THRESHOLD and alt_d < ALT_THRESHOLD
             current_pairs[pair] = is_col
             pair_metrics[pair]  = (dist, alt_d)
+            
+            if is_col:
+                degrees[p1.planeId] += 1
+                degrees[p2.planeId] += 1
+
+    # ── 2. Send all flights to Flask with Risk ────────────────
+    payload = []
+    for p in planes:
+        pd = p.asDict()
+        deg = degrees[p.planeId]
+        if deg >= 2:
+            pd["risk"] = "HIGH"
+        elif deg == 1:
+            pd["risk"] = "MEDIUM"
+        else:
+            pd["risk"] = "LOW"
+        payload.append(pd)
+        
+    safe_post("/flights", payload, label="FLIGHTS")
 
     # ── 4. Diagnostic table (every batch) ───────────────────
     total_pairs     = len(current_pairs)

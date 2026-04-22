@@ -205,12 +205,21 @@ async function loadFlights() {
 
         for (const p of data) {
             if (!p) continue;
-            const inDanger = collidingPlanes.has(p.planeId);
-            const statusHtml = inDanger
-                ? `<span class="flight-status-badge danger">⚠ RISK</span>`
-                : `<span class="flight-status-badge">● NOMINAL</span>`;
+            let statusHtml = '';
+            let rowClass = '';
+            
+            if (p.risk === 'HIGH') {
+                statusHtml = `<span class="flight-status-badge danger">🔴 HIGH RISK</span>`;
+                rowClass = 'high-risk-row';
+            } else if (p.risk === 'MEDIUM') {
+                statusHtml = `<span class="flight-status-badge warning">🟡 MEDIUM</span>`;
+                rowClass = 'medium-risk-row';
+            } else {
+                statusHtml = `<span class="flight-status-badge success">🟢 SAFE</span>`;
+            }
 
             const tr = document.createElement("tr");
+            if (rowClass) tr.className = rowClass;
             tr.innerHTML = `
                 <td><span class="flight-id">${p.planeId || "—"}</span></td>
                 <td><span class="coord-val">${Number(p.lat      || 0).toFixed(4)}</span></td>
