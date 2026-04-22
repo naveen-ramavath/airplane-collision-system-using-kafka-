@@ -13,7 +13,6 @@ State machine per pair:
 
 ONGOING heartbeats are throttled: one POST per pair every 10 s.
 """
-# in this we have graphx and spark streaming
 
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, from_json
